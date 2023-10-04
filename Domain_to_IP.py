@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 # Domain to ip
 
 from termcolor import colored
