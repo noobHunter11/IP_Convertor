@@ -1,0 +1,77 @@
+name: Nuclei Terminal Trigger
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        required: true
+        type: string
+      file_name:
+        required: true
+        type: string
+      upload_sha:
+        required: true
+        type: string
+      template_path:
+        required: true
+        type: string
+      nuclei_flags:
+        required: false
+        type: string
+      telegram_chat_id:
+        required: true
+        type: string
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Nuclei
+        run: |
+          echo "Fetching latest release info..."
+          latest_release=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest)
+          echo "Available assets:"
+          echo "$latest_release" | jq -r '.assets[].name'
+          
+          latest_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | test("nuclei.*linux.*amd64.*\\.zip$")) | .browser_download_url' | head -n1)
+          
+          if [ -z "$latest_url" ] || [ "$latest_url" = "null" ]; then
+            echo "Failed to get download URL, trying alternative pattern..."
+            latest_url=$(echo "$latest_release" | jq -r '.assets[] | select(.name | contains("linux") and contains("amd64") and endswith(".zip")) | .browser_download_url' | head -n1)
+          fi
+          
+          if [ -z "$latest_url" ] || [ "$latest_url" = "null" ]; then
+            echo "Still failed, showing all assets:"
+            echo "$latest_release" | jq -r '.assets[] | .name + " -> " + .browser_download_url'
+            exit 1
+          fi
+          
+          echo "Downloading $latest_url"
+          wget "$latest_url" -O nuclei-linux-amd64.zip
+          unzip nuclei-linux-amd64.zip
+          chmod +x nuclei
+          sudo mv nuclei /usr/local/bin/
+      - name: Download target list
+        run: curl -L "${{ inputs.file_url }}" -o targets.txt
+      - name: Clone Nuclei templates
+        run: git clone https://github.com/projectdiscovery/nuclei-templates.git
+      - name: Run Nuclei
+        run: |
+          echo "Running nuclei with flags: ${{ inputs.nuclei_flags }}"
+          nuclei -l targets.txt -t nuclei-templates/${{ inputs.template_path }} ${{ inputs.nuclei_flags }} -o result.txt
+      - name: Send result to Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: |
+          if [ -s result.txt ]; then
+            curl -F document=@result.txt "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendDocument?chat_id=${{ inputs.telegram_chat_id }}"
+          else
+            echo "No results to send"
+          fi
+      - name: Auto-delete uploaded file
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"message\": \"Delete uploaded file\", \"sha\": \"${{ inputs.upload_sha }}\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/uploads/${{ inputs.file_name }}"
